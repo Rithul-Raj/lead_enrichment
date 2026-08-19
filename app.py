@@ -1,11 +1,3 @@
-import os
-import sys
-import warnings
-warnings.filterwarnings("ignore")
-
-# Suppress Gemini SDK's AFC info message (printed to stderr)
-_devnull = open(os.devnull, "w")
-
 from collections import Counter
 from src.input_handler import get_user_input
 from src.lead_search_engine import search_leads
@@ -37,14 +29,16 @@ def main():
     print(f"Location : {location}")
     print(f"Leads    : {num_leads}\n")
     print("-" * 45)
-    print("Fetching leads from Google Maps...\n")
+    print("Fetching leads & analysing websites in parallel...")
+    print("(All websites are checked simultaneously)\n")
 
     leads = search_leads(location, industry, num_leads)
 
+    print()
     unique, dup, dup_count, new_count = remove_duplicates(leads)
     total = export_csv(unique)
 
-    print(f"Results fetched    : {len(leads)}")
+    print(f"\nResults fetched    : {len(leads)}")
     if dup_count:
         print(f"Duplicates skipped : {dup_count} (already in database)")
 
@@ -54,6 +48,7 @@ def main():
     print(f"  New Leads Added      : {new_count}")
     print(f"  Total in Database    : {total}")
 
+    # ── Service opportunity summary ─────────────────────────────────────────
     top_services = _summarise_services(leads)
     if top_services:
         print("\n  Top Service Opportunities Identified:")

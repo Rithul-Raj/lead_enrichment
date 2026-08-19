@@ -7,9 +7,8 @@ MASTER = DATA / 'all_leads_database.csv'
 
 COLS = [
     'Lead Name', 'Website', 'Website Available', 'Phone',
-    'Lead Score', 'Priority', 'Rating', 'Source', 'Location', 'Industry',
-    'Recommended Services', 'Service Opportunity Score',
-    'Email', 'Founder Name', 'Social Media',
+    'Lead Score', 'Priority', 'Source', 'Location', 'Industry',
+    'Recommended Services',
 ]
 
 def export_csv(df):

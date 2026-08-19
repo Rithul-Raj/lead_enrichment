@@ -1,27 +1,30 @@
 """
 website_analyzer.py
 -------------------
-Analyzes a lead's website to detect gaps and opportunities
-for Detagenix services. Uses rule-based HTML scraping only
-(no external AI API required).
+Analyzes a lead's website to detect gaps and map them to
+Detagenix's specific service offerings.
+
+Services (in priority order):
+    1. Security (SSL / HTTPS)   — weight 25
+    2. SEO Structure            — weight 22
+    3. Mobile Accessibility     — weight 20
+    4. UI / UX                  — weight 18
+    5. Broken / Dead Links      — weight 10
+    6. Content Freshness        — weight  5
+    Total max = 100
 
 Returns:
-    - recommended_services : comma-separated string of service names
-    - opportunity_score    : integer 0-100
-    - priority             : "High" | "Medium" | "Low"
+    - Recommended Services      : comma-separated string
+    - Service Opportunity Score : int 0–100
+    - Priority                  : "Highest" | "High" | "Medium" | "Low"
+    - Analysis Status           : "No Website" | "Success" | "Failed"
 """
 
+import re
 import requests
 from bs4 import BeautifulSoup
 
-
-# ---------------------------------------------------------------------------
-# Detagenix service definitions
-# Each entry: (service_name, weight_0_to_20, detection_function)
-# Weight reflects how valuable / urgent the service opportunity is.
-# ---------------------------------------------------------------------------
-
-# Request headers to mimic a real browser (avoid 403 blocks)
+# ── Request config ──────────────────────────────────────────────────────────
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -30,248 +33,299 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+REQUEST_TIMEOUT = 5   # seconds per page fetch  (reduced for parallel speed)
+LINK_TIMEOUT    = 2   # seconds per broken-link check (reduced for parallel speed)
 
-REQUEST_TIMEOUT = 8  # seconds
 
+# ── HTML fetcher ────────────────────────────────────────────────────────────
 
-def fetch_html(url: str):
+def _fetch(url: str):
     """
-    Fetch raw HTML from a URL.
-    Returns (soup, raw_text_lower, is_https) or (None, None, None) on failure.
-    Public so other modules (enrichment, lead_processor) can reuse it.
+    Fetch a URL and return (soup, raw_html_lowercase, final_url, is_https).
+    Returns (None, None, None, None) on any failure.
     """
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        resp = requests.get(
+            url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True
+        )
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        raw_text = resp.text.lower()   # lowercased for keyword detection
-        is_https = resp.url.startswith("https://")
-        return soup, raw_text, is_https
+        soup      = BeautifulSoup(resp.text, "lxml")
+        raw_lower = resp.text.lower()
+        final_url = resp.url
+        is_https  = final_url.startswith("https://")
+        return soup, raw_lower, final_url, is_https
     except Exception:
-        return None, None, None
-
-# Backward-compatible alias
-_fetch_html = fetch_html
+        return None, None, None, None
 
 
-# ---------------------------------------------------------------------------
-# Individual signal detectors
-# Each returns True if the opportunity/gap EXISTS (i.e., service is needed)
-# ---------------------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════════════════
+# Individual detectors — each returns True if the gap/issue EXISTS
+# (i.e., the service IS needed)
+# ════════════════════════════════════════════════════════════════════════════
 
-def _needs_web_development(website: str, soup, raw_text) -> bool:
-    """Lead has no website at all."""
-    return not website or website.strip() == ""
-
-
-def _needs_website_revamp(website: str, soup, raw_text) -> bool:
-    """Website exists but shows signs of being outdated or very thin."""
-    if not soup:
-        return False
-    # Signs of outdated site: no viewport meta, no CSS framework hint,
-    # very few links, or very short page body
-    has_viewport = bool(soup.find("meta", attrs={"name": "viewport"}))
-    has_meta_desc = bool(soup.find("meta", attrs={"name": "description"}))
-    body = soup.find("body")
-    body_text_len = len(body.get_text(strip=True)) if body else 0
-    all_links = soup.find_all("a", href=True)
-    # Flag as needing revamp if: no viewport OR no meta description AND very thin content
-    if not has_viewport:
-        return True
-    if not has_meta_desc and body_text_len < 800:
-        return True
-    if len(all_links) < 5 and body_text_len < 500:
-        return True
-    return False
-
-
-def _needs_mobile_app(website: str, soup, raw_text) -> bool:
-    """No mobile app presence detected on the website."""
-    if not raw_text:
-        return True  # can't access site → assume gap
-    app_keywords = [
-        "play store", "app store", "google play", "appstore",
-        "download app", "mobile app", "android app", "ios app",
-        "playstore", "apk", "itunes.apple.com", "play.google.com"
-    ]
-    return not any(kw in raw_text for kw in app_keywords)
-
-
-def _needs_digital_marketing(website: str, soup, raw_text) -> bool:
-    """No visible social media presence linked from the website."""
-    if not raw_text:
-        return True
-    social_keywords = [
-        "facebook.com", "instagram.com", "linkedin.com",
-        "twitter.com", "x.com", "youtube.com", "t.me",
-        "wa.me", "whatsapp"
-    ]
-    return not any(kw in raw_text for kw in social_keywords)
-
-
-def _needs_ssl(website: str, soup, raw_text, is_https) -> bool:
-    """Website is served over HTTP (not HTTPS)."""
-    if not website or website.strip() == "":
-        return False  # no website, already flagged by web dev
+# ── 1. Security (SSL / HTTPS) ── weight 25 ──────────────────────────────────
+def _check_ssl(url: str, is_https) -> bool:
+    """True if site is NOT served over HTTPS."""
     if is_https is None:
-        # Could not reach site – check URL string directly
-        return website.strip().startswith("http://")
+        # Could not reach site — infer from URL string
+        return url.strip().lower().startswith("http://")
     return not is_https
 
 
-def _needs_ai_chatbot_crm(website: str, soup, raw_text) -> bool:
-    """No live chat, chatbot, or CRM integration detected."""
-    if not raw_text:
+# ── 2. SEO Structure ── weight 22 ───────────────────────────────────────────
+def _check_seo(soup) -> bool:
+    """
+    True if the site has poor SEO structure:
+      - Missing <title> or title is blank/very short
+      - Missing meta description
+      - Missing <h1> tag, or multiple <h1> tags (bad practice)
+      - No canonical link tag
+    Two or more of the above → flag as needing SEO work.
+    """
+    if soup is None:
+        return True  # can't verify → assume gap
+
+    issues = 0
+
+    # Title check
+    title_tag = soup.find("title")
+    if not title_tag or len((title_tag.string or "").strip()) < 10:
+        issues += 1
+
+    # Meta description check
+    meta_desc = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
+    if not meta_desc or not meta_desc.get("content", "").strip():
+        issues += 1
+
+    # H1 check
+    h1_tags = soup.find_all("h1")
+    if len(h1_tags) != 1:          # 0 or 2+ h1 tags = bad SEO
+        issues += 1
+
+    # Canonical check
+    canonical = soup.find("link", attrs={"rel": re.compile(r"canonical", re.I)})
+    if not canonical:
+        issues += 1
+
+    return issues >= 2             # flag only if 2+ issues found
+
+
+# ── 3. Mobile Accessibility ── weight 20 ────────────────────────────────────
+def _check_mobile(soup, raw_lower: str) -> bool:
+    """
+    True if the site is NOT mobile-friendly:
+      - No <meta name="viewport"> tag
+      - No responsive framework hint (bootstrap, tailwind, foundation, etc.)
+      - No CSS @media queries referenced
+    """
+    if soup is None:
         return True
-    chat_keywords = [
-        "livechat", "live chat", "tawk.to", "tawkto", "intercom",
-        "freshchat", "zendesk", "hubspot", "chatbot", "chat with us",
-        "whatsapp chat", "crisp", "drift", "tidio", "helpscout"
+
+    has_viewport = bool(
+        soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
+    )
+    if not has_viewport:
+        return True  # definitive sign of non-responsive site
+
+    # Secondary check: responsive framework or media query keywords
+    responsive_hints = [
+        "bootstrap", "tailwind", "foundation", "bulma",
+        "@media", "media query", "responsive"
     ]
-    return not any(kw in raw_text for kw in chat_keywords)
+    has_responsive = any(h in raw_lower for h in responsive_hints)
+    return not has_responsive
 
 
-def _needs_crm_hrm_software(website: str, soup, raw_text) -> bool:
-    """No CRM / HRM / ERP system mentions found on the website."""
-    if not raw_text:
-        return False  # don't over-flag when unreachable
-    crm_keywords = [
-        "crm", "hrm", "erp", "payroll", "employee portal",
-        "attendance", "leave management", "zoho", "salesforce",
-        "freshdesk", "odoo", "tally"
-    ]
-    return not any(kw in raw_text for kw in crm_keywords)
+# ── 4. UI / UX ── weight 18 ─────────────────────────────────────────────────
+def _check_uiux(soup, raw_lower: str) -> bool:
+    """
+    True if the site uses an old/poor tech stack or outdated UI:
+      - Deprecated HTML tags: <font>, <center>, <marquee>, <blink>
+      - Layout tables (table used for page layout, not data)
+      - Inline style overuse (>10 inline style attributes)
+      - No modern JS framework hint
+      - Very old jQuery version
+    Two or more signals → flag as needing UI/UX work.
+    """
+    if soup is None:
+        return False   # can't analyse — don't over-flag
+
+    issues = 0
+
+    # Deprecated tags
+    deprecated = ["font", "center", "marquee", "blink"]
+    if any(soup.find(tag) for tag in deprecated):
+        issues += 1
+
+    # Layout tables (heuristic: <table> without <th> or summary)
+    tables = soup.find_all("table")
+    layout_tables = [t for t in tables if not t.find("th")]
+    if len(layout_tables) >= 2:
+        issues += 1
+
+    # Excessive inline styles
+    inline_styles = soup.find_all(style=True)
+    if len(inline_styles) > 15:
+        issues += 1
+
+    # Old jQuery (1.x, 2.x)
+    old_jquery = re.search(r'jquery[.-]([12])\.\d', raw_lower)
+    if old_jquery:
+        issues += 1
+
+    return issues >= 2
 
 
-def _needs_cloud_services(website: str, soup, raw_text) -> bool:
-    """No cloud infrastructure or hosting mentions detected."""
-    if not raw_text:
+# ── 5. Broken / Dead Links ── weight 10 ─────────────────────────────────────
+def _check_broken_links(soup, base_url: str) -> bool:
+    """
+    True if any internal/absolute links on the page return a 4xx error.
+    Checks up to 8 links to keep runtime reasonable.
+    """
+    if soup is None:
         return False
-    cloud_keywords = [
-        "aws", "amazon web services", "azure", "google cloud",
-        "gcp", "cloud hosting", "cloudflare", "digitalocean",
-        "heroku", "vercel", "netlify", "cloud storage", "s3 bucket"
-    ]
-    return not any(kw in raw_text for kw in cloud_keywords)
+
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.startswith("http"):
+            links.append(href)
+        elif href.startswith("/") and not href.startswith("//"):
+            # Build absolute URL from root
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            links.append(f"{parsed.scheme}://{parsed.netloc}{href}")
+        if len(links) >= 8:
+            break
+
+    for link in links:
+        try:
+            r = requests.head(
+                link, headers=HEADERS, timeout=LINK_TIMEOUT,
+                allow_redirects=True
+            )
+            if r.status_code >= 400:
+                return True   # at least one broken link found
+        except Exception:
+            pass   # network error on link — skip
+
+    return False
 
 
-def _needs_analytics(website: str, soup, raw_text) -> bool:
-    """No analytics or tracking scripts found."""
-    if not raw_text:
-        return True
-    analytics_keywords = [
-        "google-analytics", "googletagmanager", "gtag(", "ga(",
-        "facebook pixel", "fbq(", "hotjar", "mixpanel", "clarity",
-        "segment.com", "matomo", "piwik", "heap.io"
-    ]
-    return not any(kw in raw_text for kw in analytics_keywords)
-
-
-def _needs_ecommerce(website: str, soup, raw_text) -> bool:
-    """No e-commerce features detected."""
-    if not raw_text:
+# ── 6. Content Freshness ── weight 5 ────────────────────────────────────────
+def _check_content_freshness(soup, raw_lower: str) -> bool:
+    """
+    True if the content appears stale:
+      - Copyright year is 3+ years old
+      - Body text is very thin (< 300 characters)
+    """
+    if soup is None:
         return False
-    ecom_keywords = [
-        "add to cart", "buy now", "shop now", "checkout",
-        "woocommerce", "shopify", "razorpay", "payment gateway",
-        "place order", "my cart", "shopping cart", "stripe", "paytm",
-        "instamojo", "cashfree"
-    ]
-    return not any(kw in raw_text for kw in ecom_keywords)
+
+    issues = 0
+
+    # Old copyright year
+    year_match = re.findall(r'©\s*(\d{4})|copyright\s*©?\s*(\d{4})', raw_lower)
+    if year_match:
+        years = [int(y[0] or y[1]) for y in year_match if (y[0] or y[1])]
+        if years and max(years) <= 2021:
+            issues += 1
+
+    # Thin content
+    body = soup.find("body")
+    body_text = body.get_text(strip=True) if body else ""
+    if len(body_text) < 300:
+        issues += 1
+
+    return issues >= 1
 
 
-# ---------------------------------------------------------------------------
-# Service registry: (name, weight, detector_function_reference)
-# Total max possible weight if ALL triggered = 20+18+15+15+12+12+10+10+8+10 = 130
-# We normalize to 100 after scoring.
-# ---------------------------------------------------------------------------
-# Note: _needs_ssl and _needs_web_development need special args → handled inline
+# ════════════════════════════════════════════════════════════════════════════
+# Service registry  (name, weight)
+# Weights are already designed to sum to 100 max.
+# ════════════════════════════════════════════════════════════════════════════
 
 SERVICE_REGISTRY = [
-    # (service_name, weight, detector)
-    ("Web Development",       20, _needs_web_development),
-    ("Website Revamp",        18, _needs_website_revamp),
-    ("Mobile App Development",15, _needs_mobile_app),
-    ("Digital Marketing",     15, _needs_digital_marketing),
-    ("SSL / Security",        12, None),   # handled separately (needs is_https)
-    ("AI Chatbot / CRM",      12, _needs_ai_chatbot_crm),
-    ("CRM / HRM Software",    10, _needs_crm_hrm_software),
-    ("Cloud Services",        10, _needs_cloud_services),
-    ("Analytics Integration",  8, _needs_analytics),
-    ("E-Commerce Development", 10, _needs_ecommerce),
+    ("Security (SSL / HTTPS)", 25),
+    ("SEO Structure",          22),
+    ("Mobile Accessibility",   20),
+    ("UI / UX",                18),
+    ("Broken / Dead Links",    10),
+    ("Content Freshness",       5),
 ]
 
-MAX_POSSIBLE_WEIGHT = sum(w for _, w, _ in SERVICE_REGISTRY)  # 130
 
-
-# ---------------------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════════════════
 # Main public function
-# ---------------------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════════════════
 
-def analyze_website(website: str, soup=None, raw_text=None, is_https=None):
+def analyze_website(website: str) -> dict:
     """
-    Analyze a lead's website and return service recommendations.
+    Analyze a lead's website against Detagenix's 6 services.
 
     Parameters
     ----------
-    website : str
-        The website URL of the lead (may be empty string).
+    website : str   URL of the lead's website (may be empty).
 
     Returns
     -------
     dict with keys:
-        - "Recommended Services"    : str  (comma-separated)
-        - "Service Opportunity Score": int  (0-100)
-        - "Priority"                : str  ("High" / "Medium" / "Low")
-        - "Analysis Status"         : str  ("Success" / "No Website" / "Failed")
+        Recommended Services      (str)
+        Service Opportunity Score (int 0-100)
+        Priority                  (str: Highest / High / Medium / Low)
+        Analysis Status           (str: No Website / Success / Failed)
     """
 
-    # ── Case 1: No website ──────────────────────────────────────────────────
-    if not website or website.strip() == "":
+    # ── No website → Highest priority ───────────────────────────────────────
+    if not website or not website.strip():
         return {
-            "Recommended Services": "Web Development, Mobile App Development, Digital Marketing, AI Chatbot / CRM",
-            "Service Opportunity Score": 85,
-            "Priority": "High",
-            "Analysis Status": "No Website",
+            "Recommended Services":     "Security (SSL / HTTPS), SEO Structure, "
+                                        "Mobile Accessibility, UI / UX, "
+                                        "Broken / Dead Links, Content Freshness",
+            "Service Opportunity Score": 100,
+            "Priority":                 "Highest",
+            "Analysis Status":          "No Website",
         }
 
-    # ── Case 2: Fetch website (only if not already pre-fetched) ─────────────
-    if soup is None and raw_text is None:
-        soup, raw_text, is_https = fetch_html(website.strip())
+    # ── Fetch website ────────────────────────────────────────────────────────
+    soup, raw_lower, final_url, is_https = _fetch(website.strip())
     fetch_failed = soup is None
 
-    # ── Run all detectors ───────────────────────────────────────────────────
+    # ── Run detectors ────────────────────────────────────────────────────────
     found_services = []
-    total_weight = 0
+    total_score    = 0
 
-    for service_name, weight, detector in SERVICE_REGISTRY:
-        triggered = False
+    for service_name, weight in SERVICE_REGISTRY:
 
-        if service_name == "Web Development":
-            triggered = _needs_web_development(website, soup, raw_text)
-        elif service_name == "SSL / Security":
-            triggered = _needs_ssl(website, soup, raw_text, is_https)
-        elif detector is not None:
-            if fetch_failed:
-                # If we couldn't reach the site, skip detectors that need HTML
-                # but keep a few that can be inferred from the URL/data
-                if service_name in ("Mobile App Development", "Digital Marketing",
-                                     "Analytics Integration"):
-                    triggered = True  # conservative: assume gap
-                else:
-                    triggered = False
+        if fetch_failed:
+            # Can only check SSL from URL string; skip HTML-dependent checks
+            if service_name == "Security (SSL / HTTPS)":
+                triggered = _check_ssl(website, None)
             else:
-                triggered = detector(website, soup, raw_text)
+                triggered = False
+        else:
+            if service_name == "Security (SSL / HTTPS)":
+                triggered = _check_ssl(website, is_https)
+            elif service_name == "SEO Structure":
+                triggered = _check_seo(soup)
+            elif service_name == "Mobile Accessibility":
+                triggered = _check_mobile(soup, raw_lower)
+            elif service_name == "UI / UX":
+                triggered = _check_uiux(soup, raw_lower)
+            elif service_name == "Broken / Dead Links":
+                triggered = _check_broken_links(soup, final_url)
+            elif service_name == "Content Freshness":
+                triggered = _check_content_freshness(soup, raw_lower)
+            else:
+                triggered = False
 
         if triggered:
             found_services.append(service_name)
-            total_weight += weight
+            total_score += weight
 
-    # ── Normalize score to 0-100 ────────────────────────────────────────────
-    raw_score = round((total_weight / MAX_POSSIBLE_WEIGHT) * 100)
-    score = min(raw_score, 100)
+    score = min(total_score, 100)
 
-    # ── Determine priority ──────────────────────────────────────────────────
+    # ── Priority thresholds ──────────────────────────────────────────────────
     if score >= 60:
         priority = "High"
     elif score >= 30:
@@ -279,17 +333,16 @@ def analyze_website(website: str, soup=None, raw_text=None, is_https=None):
     else:
         priority = "Low"
 
-    # ── Handle fetch failure gracefully ────────────────────────────────────
+    # ── Graceful fallback if site was unreachable ────────────────────────────
     status = "Failed" if fetch_failed else "Success"
     if fetch_failed and not found_services:
-        # Could not reach site at all → flag basic services as potential
-        found_services = ["Website Revamp", "Mobile App Development", "Digital Marketing"]
-        score = 35
-        priority = "Medium"
+        found_services = ["SEO Structure", "Mobile Accessibility", "UI / UX"]
+        score    = 60
+        priority = "High"
 
     return {
-        "Recommended Services": ", ".join(found_services) if found_services else "None Identified",
+        "Recommended Services":     ", ".join(found_services) if found_services else "None Identified",
         "Service Opportunity Score": score,
-        "Priority": priority,
-        "Analysis Status": status,
+        "Priority":                 priority,
+        "Analysis Status":          status,
     }

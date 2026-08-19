@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+venv_new/
+env/
+.venv/
+
+# API keys / secrets — NEVER commit these
+config.py
+
+# Data files — keep out of repo (can be large / sensitive)
+data/all_leads_database.csv
+data/lead_results.csv
+data/exports/
+
+# IDE / OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

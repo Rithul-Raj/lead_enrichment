@@ -3,4 +3,3 @@ requests
 beautifulsoup4
 lxml
 google-search-results
-google-genai
