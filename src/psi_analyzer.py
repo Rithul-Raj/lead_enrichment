@@ -93,8 +93,8 @@ def _parse_scores(data: dict) -> dict:
 
 def _parse_issues(data: dict) -> list[str]:
     """
-    Derive a list of issue-flag strings from individual Lighthouse audits.
-    Each flag is a short snake_case identifier consumed by website_analyzer.py.
+    Derive a list of internal issue-flag strings (snake_case).
+    Used by website_analyzer.py to map issues -> Detagenix services.
     """
     audits = data.get("lighthouseResult", {}).get("audits", {})
     issues = []
@@ -106,22 +106,88 @@ def _parse_issues(data: dict) -> list[str]:
         s = audits.get(key, {}).get("score")
         return s is not None and s < threshold
 
-    if failed("is-on-https"):
-        issues.append("no_https")
-    if failed("viewport"):
-        issues.append("not_mobile_friendly")
-    if slow("largest-contentful-paint"):
-        issues.append("slow_lcp")
-    if failed("meta-description"):
-        issues.append("missing_meta_description")
-    if failed("document-title"):
-        issues.append("missing_title")
-    if slow("render-blocking-resources"):
-        issues.append("render_blocking_resources")
-    if slow("uses-optimized-images"):
-        issues.append("unoptimized_images")
+    if failed("is-on-https"):                issues.append("no_https")
+    if failed("viewport"):                   issues.append("not_mobile_friendly")
+    if slow("largest-contentful-paint"):     issues.append("slow_lcp")
+    if failed("meta-description"):           issues.append("missing_meta_description")
+    if failed("document-title"):             issues.append("missing_title")
+    if slow("render-blocking-resources"):    issues.append("render_blocking_resources")
+    if slow("uses-optimized-images"):        issues.append("unoptimized_images")
 
     return issues
+
+
+# Audit key → human-readable problem label, grouped by PSI category
+_PERF_AUDITS = [
+    ("first-contentful-paint",      0.5,  "Slow page load"),
+    ("largest-contentful-paint",    0.5,  "Slow main content load (LCP)"),
+    ("total-blocking-time",         0.5,  "Page response delay (TBT)"),
+    ("interactive",                 0.5,  "Slow time to interactive"),
+    ("render-blocking-resources",   0.5,  "Render-blocking code"),
+    ("uses-optimized-images",       0.5,  "Unoptimized images"),
+    ("uses-responsive-images",      0.5,  "Non-responsive images"),
+    ("uses-text-compression",       0.5,  "No text compression"),
+    ("server-response-time",        0.5,  "Slow server response"),
+    ("unused-javascript",           0.5,  "Unused JavaScript"),
+    ("unused-css-rules",            0.5,  "Unused CSS"),
+]
+
+_SEO_AUDITS = [
+    ("meta-description",   None, "Missing meta description"),
+    ("document-title",     None, "Missing page title"),
+    ("crawlable-anchors",  None, "Uncrawlable links"),
+    ("is-crawlable",       None, "Page blocked from crawling"),
+    ("link-text",          None, "Poor link text"),
+    ("image-alt",          None, "Missing image alt text"),
+    ("canonical",          None, "Missing canonical tag"),
+    ("viewport",           None, "Not mobile-friendly"),
+    ("hreflang",           None, "Missing language tags"),
+    ("structured-data",    None, "No structured data"),
+]
+
+_BP_AUDITS = [
+    ("is-on-https",             None, "Not using HTTPS (SSL missing)"),
+    ("errors-in-console",       None, "Browser console errors"),
+    ("no-vulnerable-libraries", None, "Outdated/vulnerable JS libraries"),
+    ("image-aspect-ratio",      None, "Incorrect image aspect ratios"),
+    ("doctype",                 None, "Missing DOCTYPE declaration"),
+    ("charset",                 None, "Missing charset declaration"),
+    ("geolocation-on-start",    None, "Auto geolocation request on load"),
+    ("notification-on-start",   None, "Auto notification request on load"),
+    ("password-inputs-can-be-pasted", None, "Paste blocked on password fields"),
+]
+
+
+def _parse_categorized_issues(data: dict) -> dict[str, str]:
+    """
+    Extract human-readable problem descriptions per PSI category.
+    Returns dict with keys: performance_issues, seo_issues, best_practices_issues.
+    Each value is a comma-separated string of problem labels, or empty string.
+    """
+    audits = data.get("lighthouseResult", {}).get("audits", {})
+
+    def _collect(audit_list) -> str:
+        found = []
+        for key, threshold, label in audit_list:
+            entry = audits.get(key, {})
+            score = entry.get("score")
+            if score is None:
+                continue
+            if threshold is None:
+                # binary pass/fail audit
+                if score == 0:
+                    found.append(label)
+            else:
+                # numeric score audit
+                if score < threshold:
+                    found.append(label)
+        return ", ".join(found)
+
+    return {
+        "performance_issues":    _collect(_PERF_AUDITS),
+        "seo_issues":            _collect(_SEO_AUDITS),
+        "best_practices_issues": _collect(_BP_AUDITS),
+    }
 
 
 # ── Fallback results ─────────────────────────────────────────────────────────
@@ -231,8 +297,9 @@ async def _analyze_domain(
     # ── Parse scores + issues ─────────────────────────────────────────────
     result = {
         **_parse_scores(data),
-        "issues": _parse_issues(data),
-        "status": "success",
+        "issues":    _parse_issues(data),
+        **_parse_categorized_issues(data),
+        "status":    "success",
     }
     cache[domain] = {**result, "_cached_at": time.time()}
     return domain, result

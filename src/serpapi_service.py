@@ -56,27 +56,26 @@ def _fetch_places(location: str, industry: str, num_leads: int) -> list[dict]:
 def _build_lead(place: dict, industry: str, health: dict) -> dict:
     """
     Merge SerpAPI place data with PSI health into a final lead dict.
+    Numeric PSI scores are used only for Lead Score calculation (internal).
+    CSV columns show human-readable problem descriptions instead of numbers.
     """
     website = place.get("website", "").strip()
-
-    # Score interpretation
     scoring = score_from_health(health)
 
     return {
-        "Lead Name":            place.get("title", ""),
-        "Website":              website,
-        "Website Available":    "Yes" if website else "No",
-        "Phone":                place.get("phone", ""),
-        "Lead Score":           scoring["Lead Score"],
-        "Priority":             scoring["Priority"],
-        "Source":               "SerpAPI",
-        "Location":             place.get("address", ""),
-        "Industry":             industry,
-        "Recommended Services": scoring["Recommended Services"],
-        "PSI Performance":      health.get("performance_score", ""),
-        "PSI SEO":              health.get("seo_score", ""),
-        "PSI Best Practices":   health.get("best_practices_score", ""),
-        "PSI Issues":           ", ".join(health.get("issues", [])),
+        "Lead Name":              place.get("title", ""),
+        "Website":                website,
+        "Website Available":      "Yes" if website else "No",
+        "Phone":                  place.get("phone", ""),
+        "Lead Score":             scoring["Lead Score"],
+        "Priority":               scoring["Priority"],
+        "Source":                 "SerpAPI",
+        "Location":               place.get("address", ""),
+        "Industry":               industry,
+        "Recommended Services":   scoring["Recommended Services"],
+        "Performance Issues":     health.get("performance_issues", ""),
+        "SEO Issues":             health.get("seo_issues", ""),
+        "Best Practices Issues":  health.get("best_practices_issues", ""),
     }
 
 
@@ -125,37 +124,39 @@ def search_businesses(location: str, industry: str, num_leads: int) -> list[dict
         domain = get_domain(url) if url else None
 
         if not url:
-            # No website at all
-            health  = {"status": "no_website", "issues": ["no_website"]}
+            # No website at all — no PSI call needed
             scoring = no_website_result()
+            health  = {"status": "no_website"}
             lead    = {
-                "Lead Name":            place.get("title", ""),
-                "Website":              "",
-                "Website Available":    "No",
-                "Phone":                place.get("phone", ""),
-                "Lead Score":           scoring["Lead Score"],
-                "Priority":             scoring["Priority"],
-                "Source":               "SerpAPI",
-                "Location":             place.get("address", ""),
-                "Industry":             industry,
-                "Recommended Services": scoring["Recommended Services"],
-                "PSI Performance":      "",
-                "PSI SEO":              "",
-                "PSI Best Practices":   "",
-                "PSI Issues":           "no_website",
+                "Lead Name":             place.get("title", ""),
+                "Website":               "",
+                "Website Available":     "No",
+                "Phone":                 place.get("phone", ""),
+                "Lead Score":            scoring["Lead Score"],
+                "Priority":              scoring["Priority"],
+                "Source":                "SerpAPI",
+                "Location":              place.get("address", ""),
+                "Industry":              industry,
+                "Recommended Services":  scoring["Recommended Services"],
+                "Performance Issues":    "N/A (no website)",
+                "SEO Issues":            "N/A (no website)",
+                "Best Practices Issues": "N/A (no website)",
             }
         else:
             health = health_map.get(domain, {"status": "psi_error", "issues": []})
             lead   = _build_lead(place, industry, health)
 
         leads.append(lead)
-        status = health.get("status", "?")
+        status     = health.get("status", "?")
+        perf_iss   = health.get("performance_issues", "")
+        seo_iss    = health.get("seo_issues", "")
+        bp_iss     = health.get("best_practices_issues", "")
+        issue_note = f"{len(perf_iss.split(',')) if perf_iss else 0} perf, " \
+                     f"{len(seo_iss.split(',')) if seo_iss else 0} seo, " \
+                     f"{len(bp_iss.split(',')) if bp_iss else 0} bp issues"
         print(
             f"  [{i+1}/{len(places)}] {lead['Lead Name']} "
-            f"→ Priority: {lead['Priority']}  "
-            f"(Perf: {health.get('performance_score', 'N/A')} | "
-            f"SEO: {health.get('seo_score', 'N/A')} | "
-            f"BP: {health.get('best_practices_score', 'N/A')})  [{status}]",
+            f"→ Priority: {lead['Priority']}  ({issue_note})  [{status}]",
             flush=True,
         )
 
