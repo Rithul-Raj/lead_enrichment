@@ -1,64 +1,153 @@
 """
 website_analyzer.py
 --------------------
-Score interpreter: converts a PSI `website_health` dict (produced by
-psi_analyzer.py) into Lead Score (0-100), Priority, and Recommended Services.
+Score interpreter: converts PSI website_health data (from psi_analyzer.py)
+into Lead Score, Priority, and Recommended Services.
 
-No HTTP calls are made here — all network work is done by psi_analyzer.py.
-
-Lead Score formula (inverse PSI — lower PSI score = more opportunity):
-    Lead Score = (100-perf)×0.35 + (100-seo)×0.40 + (100-bp)×0.25
+Lead Score is calculated by summing the weight of each detected issue.
+This makes the score fully transparent — it directly reflects the issues
+shown in the 'Performance Issues', 'SEO Issues', 'Best Practices Issues' columns.
 
 Priority thresholds:
-    Highest  → no website / unreachable
+    Highest  → no website / unreachable           (fixed score: 100)
     High     → score ≥ 60
     Medium   → score ≥ 30
     Low      → score < 30
-
-Recommended Services come from Lighthouse issue flags + overall score bands.
 """
 
-# ── Issue flag → Detagenix service mapping ───────────────────────────────────
+# ── Issue weights ─────────────────────────────────────────────────────────────
+# Each key is the exact human-readable label produced by psi_analyzer.py.
+# Weight reflects how serious the issue is as a service opportunity for Detagenix.
+# Total max possible score if ALL issues detected ≈ 100.
+
+ISSUE_WEIGHTS: dict[str, int] = {
+    # ── Best Practices (most critical for trust & security) ──────────────────
+    "Not using HTTPS (SSL missing)":          12,
+    "Outdated/vulnerable JS libraries":        6,
+    "Browser console errors":                  5,
+    "Missing DOCTYPE declaration":             2,
+    "Auto geolocation request on load":        1,
+    "Auto notification request on load":       1,
+    "Missing charset declaration":             1,
+    "Incorrect image aspect ratios":           1,
+    "Paste blocked on password fields":        0,
+
+    # ── SEO (critical for search visibility) ─────────────────────────────────
+    "Page blocked from crawling":             10,
+    "Missing page title":                      8,
+    "Missing meta description":                8,
+    "Not mobile-friendly":                     6,
+    "Uncrawlable links":                       5,
+    "Missing canonical tag":                   4,
+    "Missing image alt text":                  3,
+    "Poor link text":                          2,
+    "No structured data":                      2,
+    "Missing language tags":                   1,
+
+    # ── Performance ───────────────────────────────────────────────────────────
+    "Slow server response":                    8,
+    "Slow main content load (LCP)":            7,
+    "Page response delay (TBT)":               6,
+    "Render-blocking code":                    6,
+    "Slow page load":                          5,
+    "No text compression":                     4,
+    "Slow time to interactive":                4,
+    "Unoptimized images":                      3,
+    "Unused JavaScript":                       2,
+    "Non-responsive images":                   1,
+    "Unused CSS":                              1,
+}
+
+# Issue flag → Detagenix service (for Recommended Services column)
 _ISSUE_SERVICE: dict[str, str] = {
     "no_https":                  "Security (SSL / HTTPS)",
     "site_unreachable":          "Security (SSL / HTTPS)",
+    "Not using HTTPS (SSL missing)": "Security (SSL / HTTPS)",
     "not_mobile_friendly":       "Mobile Accessibility",
+    "Not mobile-friendly":       "Mobile Accessibility",
     "slow_lcp":                  "UI / UX",
+    "Slow main content load (LCP)": "UI / UX",
     "render_blocking_resources": "UI / UX",
+    "Render-blocking code":      "UI / UX",
     "unoptimized_images":        "UI / UX",
+    "Unoptimized images":        "UI / UX",
+    "Slow page load":            "UI / UX",
+    "Slow server response":      "UI / UX",
+    "Page response delay (TBT)": "UI / UX",
+    "No text compression":       "UI / UX",
+    "Unused JavaScript":         "UI / UX",
+    "Non-responsive images":     "Mobile Accessibility",
     "missing_meta_description":  "SEO Structure",
+    "Missing meta description":  "SEO Structure",
     "missing_title":             "SEO Structure",
+    "Missing page title":        "SEO Structure",
+    "Uncrawlable links":         "SEO Structure",
+    "Missing canonical tag":     "SEO Structure",
+    "Missing image alt text":    "SEO Structure",
+    "Poor link text":            "SEO Structure",
+    "No structured data":        "SEO Structure",
+    "Page blocked from crawling": "SEO Structure",
+    "Outdated/vulnerable JS libraries": "Security (SSL / HTTPS)",
+    "Browser console errors":    "Security (SSL / HTTPS)",
 }
 
-# Score bands that trigger a service even without a specific audit flag
-_PERF_THRESHOLD = 50   # performance < 50  → UI / UX
-_SEO_THRESHOLD  = 60   # seo         < 60  → SEO Structure
-_BP_THRESHOLD   = 60   # best-practices < 60 → Security (SSL / HTTPS)
+
+def _parse_issue_list(issues_str: str) -> list[str]:
+    """Split a comma-separated issue string into individual issue labels."""
+    if not issues_str or issues_str.startswith("N/A"):
+        return []
+    return [s.strip() for s in issues_str.split(",") if s.strip()]
 
 
-def _issues_to_services(issues: list, health: dict) -> str:
+def _score_from_issues(
+    perf_issues: str,
+    seo_issues: str,
+    bp_issues: str,
+) -> int:
+    """
+    Sum the weights of all detected issues to produce a Lead Score (0-100).
+    Each issue label maps to a fixed point value in ISSUE_WEIGHTS.
+    """
+    all_issues = (
+        _parse_issue_list(perf_issues)
+        + _parse_issue_list(seo_issues)
+        + _parse_issue_list(bp_issues)
+    )
+    total = sum(ISSUE_WEIGHTS.get(issue, 0) for issue in all_issues)
+    return min(total, 100)
+
+
+def _build_recommended_services(
+    perf_issues: str,
+    seo_issues: str,
+    bp_issues: str,
+    internal_flags: list,
+) -> str:
+    """
+    Map detected issues to Detagenix service names.
+    Combines human-readable issue labels + internal snake_case flags.
+    """
     services: set[str] = set()
 
-    # Map specific audit flags
-    for issue in issues:
-        svc = _ISSUE_SERVICE.get(issue)
+    all_labels = (
+        _parse_issue_list(perf_issues)
+        + _parse_issue_list(seo_issues)
+        + _parse_issue_list(bp_issues)
+    )
+    for label in all_labels:
+        svc = _ISSUE_SERVICE.get(label)
         if svc:
             services.add(svc)
 
-    # Map overall score bands
-    perf = health.get("performance_score")
-    seo  = health.get("seo_score")
-    bp   = health.get("best_practices_score")
-
-    if perf is not None and perf < _PERF_THRESHOLD:
-        services.add("UI / UX")
-    if seo is not None and seo < _SEO_THRESHOLD:
-        services.add("SEO Structure")
-    if bp is not None and bp < _BP_THRESHOLD:
-        services.add("Security (SSL / HTTPS)")
+    for flag in internal_flags:
+        svc = _ISSUE_SERVICE.get(flag)
+        if svc:
+            services.add(svc)
 
     return ", ".join(sorted(services)) if services else "None Identified"
 
+
+# ── Main scoring function ────────────────────────────────────────────────────
 
 def score_from_health(health: dict) -> dict:
     """
@@ -67,21 +156,20 @@ def score_from_health(health: dict) -> dict:
     Parameters
     ----------
     health : dict
-        Output from psi_analyzer._analyze_domain / run_batch.
-        Keys: performance_score, seo_score, best_practices_score,
-              issues (list), status.
+        Output from psi_analyzer. Keys include:
+            performance_issues    (str, comma-separated labels)
+            seo_issues            (str, comma-separated labels)
+            best_practices_issues (str, comma-separated labels)
+            issues                (list of internal flags)
+            status                (str)
 
     Returns
     -------
-    dict with:
-        Lead Score          (int 0-100)
-        Priority            (str)
-        Recommended Services(str, comma-separated)
+    dict with: Lead Score (int), Priority (str), Recommended Services (str)
     """
     status = health.get("status", "")
-    issues = health.get("issues", [])
 
-    # ── No website or completely unreachable ─────────────────────────────────
+    # ── No website or unreachable ────────────────────────────────────────────
     if status in ("site_unreachable", "no_website"):
         return {
             "Lead Score":           100,
@@ -92,26 +180,21 @@ def score_from_health(health: dict) -> dict:
             ),
         }
 
-    perf = health.get("performance_score")
-    seo  = health.get("seo_score")
-    bp   = health.get("best_practices_score")
-
-    # ── PSI call failed after retries — use conservative fallback ────────────
-    if status == "psi_error" or (perf is None and seo is None and bp is None):
+    # ── PSI call failed — use conservative fallback ──────────────────────────
+    if status == "psi_error":
         return {
-            "Lead Score":           65,
+            "Lead Score":           60,
             "Priority":             "High",
             "Recommended Services": "SEO Structure, Mobile Accessibility, UI / UX",
         }
 
-    # ── Normal case: compute opportunity score from inverse PSI ──────────────
-    # Use 50 as neutral if a category is unexpectedly None
-    p = perf if perf is not None else 50
-    s = seo  if seo  is not None else 50
-    b = bp   if bp   is not None else 50
+    # ── Normal case: score based on detected issues ──────────────────────────
+    perf_issues = health.get("performance_issues", "")
+    seo_issues  = health.get("seo_issues", "")
+    bp_issues   = health.get("best_practices_issues", "")
+    flags       = health.get("issues", [])
 
-    lead_score = round((100 - p) * 0.35 + (100 - s) * 0.40 + (100 - b) * 0.25)
-    lead_score = max(0, min(lead_score, 100))
+    lead_score = _score_from_issues(perf_issues, seo_issues, bp_issues)
 
     # ── Priority ──────────────────────────────────────────────────────────────
     if lead_score >= 60:
@@ -124,12 +207,14 @@ def score_from_health(health: dict) -> dict:
     return {
         "Lead Score":           lead_score,
         "Priority":             priority,
-        "Recommended Services": _issues_to_services(issues, health),
+        "Recommended Services": _build_recommended_services(
+            perf_issues, seo_issues, bp_issues, flags
+        ),
     }
 
 
 def no_website_result() -> dict:
-    """Scoring result for a lead that has no website URL at all."""
+    """Scoring result for a lead with no website URL."""
     return {
         "Lead Score":           100,
         "Priority":             "Highest",
@@ -137,8 +222,4 @@ def no_website_result() -> dict:
             "Security (SSL / HTTPS), SEO Structure, "
             "Mobile Accessibility, UI / UX"
         ),
-        "PSI Performance":    "",
-        "PSI SEO":            "",
-        "PSI Best Practices": "",
-        "PSI Issues":         "no_website",
     }
