@@ -9,6 +9,7 @@ COLS = [
     'Lead Name', 'Website', 'Website Available', 'Phone',
     'Lead Score', 'Priority', 'Source', 'Location', 'Industry',
     'Recommended Services',
+    'PSI Performance', 'PSI SEO', 'PSI Best Practices', 'PSI Issues',
 ]
 
 def export_csv(df):
