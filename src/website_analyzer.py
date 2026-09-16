@@ -21,6 +21,10 @@ Priority thresholds:
 # Total max possible score if ALL issues detected ≈ 100.
 
 ISSUE_WEIGHTS: dict[str, int] = {
+    # ── Fallback descriptive labels (for unreachable / error cases) ───────────
+    "Website is down / unreachable":              30,
+    "Cannot analyse \u2014 site not responding":        10,
+
     # ── Best Practices (most critical for trust & security) ──────────────────
     "Not using HTTPS (SSL missing)":          12,
     "Outdated/vulnerable JS libraries":        6,
@@ -169,8 +173,8 @@ def score_from_health(health: dict) -> dict:
     """
     status = health.get("status", "")
 
-    # ── No website or unreachable ────────────────────────────────────────────
-    if status in ("site_unreachable", "no_website"):
+    # ── No website at all ───────────────────────────────────────────────────
+    if status == "no_website":
         return {
             "Lead Score":           100,
             "Priority":             "Highest",
@@ -180,12 +184,32 @@ def score_from_health(health: dict) -> dict:
             ),
         }
 
-    # ── PSI call failed — use conservative fallback ──────────────────────────
+    # ── Site unreachable: score from the issues we can infer ─────────────────
+    # (HTTPS missing is certain; site being down is itself a critical issue)
+    if status == "site_unreachable":
+        perf_issues = health.get("performance_issues", "Website is down / unreachable")
+        seo_issues  = health.get("seo_issues", "")
+        bp_issues   = health.get("best_practices_issues", "Not using HTTPS (SSL missing)")
+        flags       = health.get("issues", [])
+        lead_score  = _score_from_issues(perf_issues, seo_issues, bp_issues)
+        # Minimum 20 pts for being unreachable even if issue text gives 0
+        lead_score  = max(lead_score, 20)
+        lead_score  = min(lead_score, 100)
+        priority    = "High" if lead_score >= 60 else "Medium" if lead_score >= 30 else "Low"
+        return {
+            "Lead Score":           lead_score,
+            "Priority":             priority,
+            "Recommended Services": _build_recommended_services(
+                perf_issues, seo_issues, bp_issues, flags
+            ),
+        }
+
+    # ── PSI call failed — no data, no score ──────────────────────────────────
     if status == "psi_error":
         return {
-            "Lead Score":           60,
-            "Priority":             "High",
-            "Recommended Services": "SEO Structure, Mobile Accessibility, UI / UX",
+            "Lead Score":           0,
+            "Priority":             "Low",
+            "Recommended Services": "None Identified (analysis failed)",
         }
 
     # ── Normal case: score based on detected issues ──────────────────────────

@@ -198,12 +198,25 @@ def _fallback(status: str, issues: list[str] | None = None) -> dict:
         "seo_score":            None,
         "best_practices_score": None,
         "issues":               issues or [status],
+        "performance_issues":   "",
+        "seo_issues":           "",
+        "best_practices_issues": "",
         "status":               status,
     }
 
 
-UNREACHABLE_FALLBACK = _fallback("site_unreachable", ["no_https", "site_unreachable"])
-PSI_ERROR_FALLBACK   = _fallback("psi_error")
+UNREACHABLE_FALLBACK = _fallback(
+    "site_unreachable",
+    ["no_https", "site_unreachable"],
+)
+UNREACHABLE_FALLBACK["performance_issues"]    = "Website is down / unreachable"
+UNREACHABLE_FALLBACK["seo_issues"]           = "Cannot analyse — site not responding"
+UNREACHABLE_FALLBACK["best_practices_issues"] = "Not using HTTPS (SSL missing)"
+
+PSI_ERROR_FALLBACK = _fallback("psi_error")
+PSI_ERROR_FALLBACK["performance_issues"]    = "PSI analysis failed — check site manually"
+PSI_ERROR_FALLBACK["seo_issues"]            = "PSI analysis failed — check site manually"
+PSI_ERROR_FALLBACK["best_practices_issues"] = "PSI analysis failed — check site manually"
 
 
 # ── Async helpers ────────────────────────────────────────────────────────────
